@@ -144,9 +144,11 @@ class PriorityAgent(BaseAgent):
 
         # ── Tracciamento AoI ──
         tracked_entities = self.priority_nodes + self.water_net.iot_valves
+        # Ogni volta che l'Agente riceve un pacchetto LoRaWAN valido da un sensore, aggiornerà questo valore con l'ora esatta della simulazione. Se il nodo subisce Packet Loss, il cronometro rimane fermo al vecchio orario, e il dato "invecchia"
         self.last_update_time = {entity: 0.0 for entity in tracked_entities}
-
-        self.uncertainty_weight = 0.3
+        # l'Agente valuta il rischio totale calcolando per il 70% il deficit idraulico effettivo (la mancanza d'acqua) e per il 30% (lo 0.3) l'incertezza dovuta al buco radio.
+        self.uncertainty_weight = 0.3 
+        # Se un nodo non trasmette un pacchetto valido per 2 ore, la sua incertezza raggiunge il 100%
         self.max_uncertainty_time = 7200.0
 
         # ── Log di inizializzazione ──
@@ -171,10 +173,12 @@ class PriorityAgent(BaseAgent):
             except KeyError:
                 continue
 
-        deg = torch.sum(adj, dim=1)
+        deg = torch.sum(adj, dim=1) #calcola quanti collegamenti ha un nodo
+        #passaggi per normalizzazione spettrale utile per smorzare la voce dei nodi che hano troppi collegamenti (hub), che altrimenti farebbero esplodere il valore dei vicini
         deg_inv_sqrt = torch.pow(deg + 1e-6, -0.5)
-        norm_adj = deg_inv_sqrt.view(-1, 1) * adj * deg_inv_sqrt.view(1, -1)
+        norm_adj = deg_inv_sqrt.view(-1, 1) * adj * deg_inv_sqrt.view(1, -1) 
 
+        # somma alla matrice normalizzata una matrice identità cosi che il nodo ricordi anche il suo valore oltre a quello dei vicini prima del message passing al layer successivo
         self.adj_matrix = norm_adj + torch.eye(self.num_nodes)
         deg2 = torch.sum(self.adj_matrix, dim=1)
         deg2_inv_sqrt = torch.pow(deg2 + 1e-6, -0.5)
@@ -188,7 +192,7 @@ class PriorityAgent(BaseAgent):
                        sim=None) -> dict:
         import math
         
-        # 1. Costruzione osservazione corrente
+        # 1. Costruzione osservazione corrente , tensore a 4 colonne per ogni nodo (pressione, livello cisterna, stato valvola, flag priorità)
         current_obs = self.belief_state[:, 0:1].clone()
         current_obs = torch.cat([
             current_obs,
@@ -201,22 +205,22 @@ class PriorityAgent(BaseAgent):
         # 2. Assimilazione telemetria uplink
         for pkt in received_telemetry:
             s_id = pkt.get('id')
-            data = pkt.get('data', {})
+            data = pkt.get('data', {}) #estrae identificativo e payload
             target_node_name = None
 
-            if data.get('type') == 'PRIORITY_NODE':
+            if data.get('type') == 'PRIORITY_NODE': # se è un nodo normale
                 target_node_name = s_id
                 if s_id in self.last_update_time:
-                    self.last_update_time[s_id] = t
+                    self.last_update_time[s_id] = t #azzeramento cronometro
 
-            elif data.get('type') == 'IOT_TANK':
+            elif data.get('type') == 'IOT_TANK': # se è una cisterna di emergenza (tubo che collega serbatoio a nodo)
                 if s_id in self.last_update_time:
                     self.last_update_time[s_id] = t
                 try:
                     if sim and hasattr(sim, '_wn'):
-                        link = sim._wn.get_link(s_id)
+                        link = sim._wn.get_link(s_id) #interroga il motore fisico per capire il nodo che sta sversando acqua 
                         target_node_name = link.end_node_name
-                        served = data.get('served_priority_node')
+                        served = data.get('served_priority_node') #verifica se la cisterna è stata posizionata appost per un nodo
                         if served and served in self.last_update_time:
                             self.last_update_time[served] = t
                 except Exception:
@@ -224,7 +228,7 @@ class PriorityAgent(BaseAgent):
 
             if target_node_name and target_node_name in self.node_to_idx:
                 idx = self.node_to_idx[target_node_name]
-                valid_mask[idx] = True
+                valid_mask[idx] = True #se la amschera è true quando piu avanti appichi la gnn ignora questo nodo e considera il dato reale
                 current_obs[idx, 0] = data.get('node_p', 0.0)
                 current_obs[idx, 1] = data.get('tank_lvl', 0.0)
                 current_obs[idx, 2] = data.get('v_setting', 0.0)
