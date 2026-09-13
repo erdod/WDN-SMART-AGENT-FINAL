@@ -310,6 +310,10 @@ class CoSimulationEngine:
         self.perf_log = self.log_dir / "main_performance.txt"
         self.valve_csv = self.log_dir / "valve_commands.csv"
         self.valve_settings_csv = self.log_dir / "valve_settings.csv"
+        self.gnn_csv = self.log_dir / "gnn_node_embeddings.csv"
+        self.gnn_csv.write_text("step,time_hours,node_name,est_pressure,hidden_feature\n")
+        self.risk_csv = self.log_dir / "ai_risk_decomposition.csv"
+        self.risk_csv.write_text("step,time_hours,max_risk,max_deficit,max_uncertainty\n")
 
         self.perf_log.write_text(
             "STEP | EXPECTED | ACTUAL | DIFF | SATISFACTION | TX_INT | OBJECTIVE\n"
@@ -408,6 +412,8 @@ class CoSimulationEngine:
                 # ── Decisione agente (basata su telemetria confermata) ─────────
                 # FIX: singola chiamata decide_action con received_uplink (list[dict])
                 action = self.agent.decide_action(step, t, received_uplink, sim=self.sim)
+                self._write_gnn_logs(step, t, action)
+                self._write_risk_logs(step, t, action)
                 
                 if 'tx_interval' in action:
                     self.lora_net.tx_interval_s = action['tx_interval']
@@ -776,6 +782,36 @@ class CoSimulationEngine:
                         pass
         except Exception as exc:
             logger.debug("valve_settings_csv write error: %s", exc)
+            
+    def _write_gnn_logs(self, step: int, t: float, action: dict):
+        """Salva il Belief State della GNN solo per i nodi prioritari."""
+        if 'gnn_state' not in action or 'node_names' not in action:
+            return
+        
+        gnn_state = action['gnn_state']
+        node_names = action['node_names']
+        prio_set = set(self.agent.priority_nodes)
+        
+        try:
+            with self.gnn_csv.open("a") as f:
+                for idx, n_name in enumerate(node_names):
+                    if n_name in prio_set:
+                        est_press = float(gnn_state[idx, 0])
+                        hidden_feat = float(gnn_state[idx, 1])
+                        f.write(f"{step},{t/3600:.2f},{n_name},{est_press:.4f},{hidden_feat:.4f}\n")
+        except Exception as exc:
+            logger.debug("gnn_csv write error: %s", exc)
+            
+    def _write_risk_logs(self, step: int, t: float, action: dict):
+        """Salva i componenti del rischio (Idraulico vs Cyber) calcolati dall'IA."""
+        if 'max_risk' not in action:
+            return
+        try:
+            with self.risk_csv.open("a") as f:
+                f.write(f"{step},{t/3600:.2f},{action['max_risk']:.4f},"
+                        f"{action['max_deficit']:.4f},{action['max_uncertainty']:.4f}\n")
+        except Exception as exc:
+            logger.debug("risk_csv write error: %s", exc)
 
     def _export_topology_js(self) -> list:
         """Esporta la topologia della rete nel file Dashboard/data.js."""

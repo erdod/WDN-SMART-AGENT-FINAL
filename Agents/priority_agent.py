@@ -233,16 +233,16 @@ class PriorityAgent(BaseAgent):
                 current_obs[idx, 1] = data.get('tank_lvl', 0.0)
                 current_obs[idx, 2] = data.get('v_setting', 0.0)
                 if data.get('is_priority_node', False) or target_node_name in self.priority_nodes:
-                    current_obs[idx, 3] = 1.0
+                    current_obs[idx, 3] = 1.0 #inserisce un 1 nella colonna finale cosi che la gnn sa che è un nodo vitale
 
         # 3. Aggiornamento Belief State tramite GNN
         with torch.no_grad():
-            new_belief = self.gnn(current_obs, self.adj_matrix)
+            new_belief = self.gnn(current_obs, self.adj_matrix) #la gnn farà parlare tra loro tutti i nodi attraverso la matrice di adiacenza
             alpha_mem = 0.8
             self.belief_state = torch.where(
                 valid_mask.unsqueeze(1),
                 new_belief,
-                alpha_mem * self.belief_state + (1 - alpha_mem) * new_belief
+                alpha_mem * self.belief_state + (1 - alpha_mem) * new_belief # se la mask è false (pacchetto perso) si apllica filtro EMA con aplha=0.8
             )
 
         # 4. Calcolo rischio bi-obiettivo
@@ -252,13 +252,13 @@ class PriorityAgent(BaseAgent):
         req_pressure = 35.0
 
         if self.collective_mode:
-            est_pressures = self.belief_state[:, 0]
-            deficits = torch.clamp((req_pressure - est_pressures) / req_pressure, min=0.0)
-            max_deficit = torch.mean(deficits).item()
-            if self.water_net.iot_valves:
-                times_since = [t - self.last_update_time.get(v, 0.0) for v in self.water_net.iot_valves]
-                max_uncertainty = min(1.0, sum(times_since) / len(times_since) / self.max_uncertainty_time)
-            max_risk = ((1.0 - self.uncertainty_weight) * max_deficit + self.uncertainty_weight * max_uncertainty)
+            est_pressures = self.belief_state[:, 0] #prende tutte le pressioni dei nodi 
+            deficits = torch.clamp((req_pressure - est_pressures) / req_pressure, min=0.0)# calcola i deficit per ogni nodo mettedno a 0 se il deficit è negativo
+            max_deficit = torch.mean(deficits).item() # calcola il deficit medio nella mappa idrica
+            if self.water_net.iot_valves: #verifica se ci sono valvole intelligenti a disposizione
+                times_since = [t - self.last_update_time.get(v, 0.0) for v in self.water_net.iot_valves] #calcolo ritardi radio per tutte le valvole
+                max_uncertainty = min(1.0, sum(times_since) / len(times_since) / self.max_uncertainty_time) #calcolo incertezze
+            max_risk = ((1.0 - self.uncertainty_weight) * max_deficit + self.uncertainty_weight * max_uncertainty) #calcolo rischio massimo basandosi su massima incertezza
         else:
             for p_node in self.priority_nodes:
                 if p_node not in self.node_to_idx: continue
@@ -266,7 +266,7 @@ class PriorityAgent(BaseAgent):
                 est_pressure = self.belief_state[idx, 0].item()
                 deficit = max(0.0, (req_pressure - est_pressure) / req_pressure)
                 max_deficit = max(max_deficit, deficit)
-                time_since = t - self.last_update_time.get(p_node, 0.0)
+                time_since = t - self.last_update_time.get(p_node, 0.0) # qui facciamo gli stessi calcoli del caso precedente ma non per le valvole ma direttamente per i nodi prioritari
                 uncertainty = min(1.0, time_since / self.max_uncertainty_time)
                 max_uncertainty = max(max_uncertainty, uncertainty)
                 risk = ((1.0 - self.uncertainty_weight) * deficit + self.uncertainty_weight * uncertainty)
@@ -301,6 +301,11 @@ class PriorityAgent(BaseAgent):
                 "k_iso_dict": {v: self.K_ISO_MIN for v in self.isolation_valves},
                 "step": step,
                 "critical_valves": critical_valves,
+                "gnn_state": self.belief_state.detach().cpu().numpy(),
+                "node_names": self.node_names,
+                "max_risk": max_risk,
+                "max_deficit": max_deficit,
+                "max_uncertainty": max_uncertainty,
             }   
 
         if not hasattr(self, '_valves_closed_since'):
@@ -468,6 +473,11 @@ class PriorityAgent(BaseAgent):
             "k_iso": k_iso,
             "step": step,
             "critical_valves": critical_valves,
+            "gnn_state": self.belief_state.detach().cpu().numpy(),
+            "node_names": self.node_names,
+            "max_risk": max_risk,
+            "max_deficit": max_deficit,
+            "max_uncertainty": max_uncertainty,
         }
     # ──────────────────────────────────────────────────────────────────────────
     # Formattazione comandi downlink
